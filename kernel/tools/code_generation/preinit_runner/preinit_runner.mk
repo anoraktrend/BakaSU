@@ -1,15 +1,34 @@
 # preinit runner: a static nolibc binary embedded into kernelsu, see preinit/.
 # It is built against the installed UAPI headers of the target kernel
 # (CONFIG_HEADERS_INSTALL, enabled by gki_defconfig).
-KSU_UAPI_INC := $(objtree)/usr/include
+# $(objtree) is "." whenever kbuild runs with the object tree as the working
+# directory (after the top-level O= split) and unset in a few other
+# invocations. Resolve it once, preferring the explicit O= and falling back to
+# the working directory, so the header check, the fallback install and the
+# runner build all agree on one absolute tree.
+KSU_OBJTREE := $(abspath $(if $(filter-out . ./,$(objtree)),$(objtree),$(if $(O),$(O),$(CURDIR))))
+KSU_UAPI_INC := $(KSU_OBJTREE)/usr/include
 
 ifeq ($(wildcard $(KSU_UAPI_INC)/linux/unistd.h),)
-KSU_HEADERS_INSTALL_OUTPUT := $(shell $(MAKE) -s -C "$(abspath $(srctree))" \
-	O="$(abspath $(objtree))" ARCH="$(ARCH)" \
-	headers_install INSTALL_HDR_PATH="$(abspath $(objtree))/usr")
+# Fallback for trees that do not install the UAPI headers themselves. Run the
+# nested make from the object tree, the way kbuild's own split sub-make does:
+# with KBUILD_SRC set the top-level Makefile resolves every relative generated
+# path against the working directory, so a child that is pointed at the source
+# tree (make -C $(srctree), as this used to) writes its generated headers into
+# the sources. That dies with EROFS on read-only trees such as Android's build
+# sandbox, and on writable trees it silently pollutes the sources; with the
+# working directory on the object tree everything lands where it belongs.
+KSU_HEADERS_INSTALL_OUTPUT := $(shell mkdir -p "$(KSU_OBJTREE)" && cd "$(KSU_OBJTREE)" && \
+	$(MAKE) -s -f "$(abspath $(srctree))/Makefile" \
+	--include-dir="$(abspath $(srctree))" \
+	KBUILD_SRC="$(abspath $(srctree))" \
+	ARCH="$(ARCH)" headers_install INSTALL_HDR_PATH="$(KSU_OBJTREE)/usr")
 endif
 
-ifneq ($(wildcard $(KSU_UAPI_INC)/linux/unistd.h),)
+ifeq ($(wildcard $(KSU_UAPI_INC)/linux/unistd.h),)
+$(error $(REPO_NAME): the preinit runner needs the kernel UAPI headers, but $(KSU_UAPI_INC)/linux/unistd.h is missing and installing it failed. Install them with "make O=$(KSU_OBJTREE) headers_install" (or make the object tree writable) and rebuild.)
+endif
+
 kernelsu-objs += preinit/preinit.o
 kernelsu-objs += preinit/blob.o
 
@@ -46,8 +65,4 @@ $(KSU_RUNNER_TARGET): $(KSU_RUNNER_SRC)/runner.c \
 targets += preinit/runner.elf
 $(obj)/preinit/blob.o: $(KSU_RUNNER_TARGET)
 asflags-y += -DKSU_PREINIT_RUNNER_BIN=\"$(KSU_RUNNER_BIN)\"
-else
-$(warning -- $(REPO_NAME): $(KSU_UAPI_INC) not found, preinit disabled)
-ccflags-y += -DKSU_NO_PREINIT
-endif
 
